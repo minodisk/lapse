@@ -1,6 +1,6 @@
 [package]
 name = "lapse"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "連写 JPEG の DateTimeOriginal を 1 秒刻みでずらし、Google フォトで撮影順を保つ CLI"
 license = "MIT"
