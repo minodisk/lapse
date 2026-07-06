@@ -17,6 +17,10 @@ The EXIF rewrite is done by **in-place replacement of the target tag values (fix
 
 ## Installation
 
+Download the prebuilt binary for your platform (Linux x86_64 / aarch64, macOS Apple Silicon / Intel, Windows x86_64) from [Releases](https://github.com/minodisk/lapse/releases/latest), extract the archive, and place `lapse` somewhere on your `PATH`.
+
+Alternatively, build from source with Cargo:
+
 ```sh
 cargo install --path .
 ```
