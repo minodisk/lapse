@@ -1,11 +1,13 @@
-//! テスト用サンプル JPEG の生成。
-//! バイナリをリポジトリに同梱する代わりに、image crate で小さな JPEG を
-//! エンコードし、手組みの EXIF APP1 セグメント（Make / Model / 日時 3 種 /
-//! PixelXDimension / PixelYDimension / MakerNote / GPS IFD 付き）を挿入する。
+//! Generation of sample JPEGs for tests.
+//! Instead of bundling binaries in the repository, encodes a small JPEG with
+//! the image crate and inserts a hand-built EXIF APP1 segment (with Make /
+//! Model / all three date-time tags / PixelXDimension / PixelYDimension /
+//! MakerNote / GPS IFD).
 
 use std::io::Cursor;
 
-/// サンプルの基準時刻。分の繰り上がり（+1 秒で 03:05:00）も検証できる値にしている。
+/// Base time of the samples. Chosen so that minute carry-over (+1 second
+/// giving 03:05:00) can also be verified.
 pub const BASE_DATETIME: &str = "2024:01:02 03:04:59";
 
 pub const MAKE: &str = "TestMake";
@@ -13,16 +15,16 @@ pub const MODEL: &str = "TestModel";
 pub const WIDTH: u32 = 16;
 pub const HEIGHT: u32 = 16;
 
-/// EXIF 付きサンプル JPEG を生成する。
+/// Generates a sample JPEG with EXIF.
 pub fn sample_jpeg() -> Vec<u8> {
     sample_jpeg_with(BASE_DATETIME)
 }
 
-/// DateTimeOriginal を指定した EXIF 付きサンプル JPEG を生成する。
+/// Generates a sample JPEG with EXIF whose DateTimeOriginal is the given value.
 pub fn sample_jpeg_with(dt: &str) -> Vec<u8> {
     let base = plain_jpeg();
     let app1 = build_exif_app1(dt);
-    // SOI 直後に APP1 を挿入する
+    // Insert APP1 right after SOI
     let mut out = Vec::with_capacity(base.len() + app1.len());
     out.extend_from_slice(&base[..2]);
     out.extend_from_slice(&app1);
@@ -30,7 +32,7 @@ pub fn sample_jpeg_with(dt: &str) -> Vec<u8> {
     out
 }
 
-/// EXIF なしの JPEG（エラーケース検証用）
+/// JPEG without EXIF (for verifying error cases)
 pub fn plain_jpeg() -> Vec<u8> {
     let img = image::RgbImage::from_fn(WIDTH, HEIGHT, |x, y| {
         image::Rgb([(x * 16) as u8, (y * 16) as u8, 128])
@@ -47,18 +49,18 @@ fn build_exif_app1(dt: &str) -> Vec<u8> {
     let mut dt20 = dt.as_bytes().to_vec();
     dt20.push(0);
 
-    // TIFF レイアウト (リトルエンディアン):
-    //   header(8) + IFD0(2+5*12+4=66) + ExifIFD(66) + GPSIFD(2+3*12+4=42) + データ領域
+    // TIFF layout (little-endian):
+    //   header(8) + IFD0(2+5*12+4=66) + ExifIFD(66) + GPSIFD(2+3*12+4=42) + data area
     const IFD0: u32 = 8;
     const EXIF_IFD: u32 = IFD0 + 66;
     const GPS_IFD: u32 = EXIF_IFD + 66;
     const DATA_START: u32 = GPS_IFD + 42;
 
-    // データ領域に値を置き、TIFF ヘッダ相対オフセットを返す
+    // Places a value in the data area and returns its TIFF-header-relative offset
     let mut data: Vec<u8> = Vec::new();
     let put = |data: &mut Vec<u8>, bytes: &[u8]| -> u32 {
         if data.len() % 2 == 1 {
-            data.push(0); // ワード境界に揃える
+            data.push(0); // align to word boundary
         }
         let off = DATA_START + data.len() as u32;
         data.extend_from_slice(bytes);
@@ -96,7 +98,7 @@ fn build_exif_app1(dt: &str) -> Vec<u8> {
     tiff.extend_from_slice(&42u16.to_le_bytes());
     tiff.extend_from_slice(&IFD0.to_le_bytes());
 
-    // IFD0: Make, Model, DateTime, ExifIFD ポインタ, GPSIFD ポインタ
+    // IFD0: Make, Model, DateTime, ExifIFD pointer, GPSIFD pointer
     tiff.extend_from_slice(&5u16.to_le_bytes());
     entry(&mut tiff, 0x010F, 2, make.len() as u32, off4(make_off));
     entry(&mut tiff, 0x0110, 2, model.len() as u32, off4(model_off));

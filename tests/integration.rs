@@ -19,20 +19,21 @@ fn run_all(dir: &Path) {
     for (path, result) in &summary.results {
         assert!(
             result.is_ok(),
-            "{} の処理に失敗: {:?}",
+            "failed to process {}: {:?}",
             path.display(),
             result.as_ref().err()
         );
     }
 }
 
-/// SOS マーカー以降（エントロピー符号化されたスキャンデータと EOI）を返す。
-/// サンプル JPEG では APP1 内に 0xFFDA が現れないことを前提にした簡易実装。
+/// Returns everything from the SOS marker on (the entropy-coded scan data and
+/// EOI). Simplified implementation assuming 0xFFDA never appears inside APP1
+/// in the sample JPEGs.
 fn scan_data(buf: &[u8]) -> &[u8] {
     let pos = buf
         .windows(2)
         .position(|w| w == [0xFF, 0xDA])
-        .expect("SOS マーカーが見つからない");
+        .expect("SOS marker not found");
     &buf[pos..]
 }
 
@@ -56,29 +57,30 @@ fn read_ascii_tag(buf: &[u8], tag: exif::Tag) -> String {
         .unwrap();
     let field = exif
         .get_field(tag, exif::In::PRIMARY)
-        .unwrap_or_else(|| panic!("{tag} がない"));
+        .unwrap_or_else(|| panic!("{tag} is missing"));
     match &field.value {
         exif::Value::Ascii(v) => String::from_utf8(v[0].clone()).unwrap(),
-        other => panic!("{tag} が ASCII ではない: {other:?}"),
+        other => panic!("{tag} is not ASCII: {other:?}"),
     }
 }
 
 fn assert_exif_datetime_format(s: &str) {
-    assert_eq!(s.len(), 19, "日時の長さが 19 バイトでない: {s:?}");
+    assert_eq!(s.len(), 19, "date-time is not 19 bytes long: {s:?}");
     for (i, c) in s.char_indices() {
         match i {
-            4 | 7 | 13 | 16 => assert_eq!(c, ':', "位置 {i} がコロンでない: {s:?}"),
-            10 => assert_eq!(c, ' ', "位置 10 が空白でない: {s:?}"),
-            _ => assert!(c.is_ascii_digit(), "位置 {i} が数字でない: {s:?}"),
+            4 | 7 | 13 | 16 => assert_eq!(c, ':', "position {i} is not a colon: {s:?}"),
+            10 => assert_eq!(c, ' ', "position 10 is not a space: {s:?}"),
+            _ => assert!(c.is_ascii_digit(), "position {i} is not a digit: {s:?}"),
         }
     }
 }
 
-/// テスト 1: 無劣化保証（本ツールの中核的保証）。
-/// インプレース置換方式なので、処理前後でファイル長が変わらず、
-/// 差分バイトが APP1 内の対象日時タグの値領域（19 バイト × 3 箇所）のみに
-/// 収まることをバイト単位で検証する。加えてスキャンデータの完全一致と、
-/// デコード後のピクセル配列のビット単位一致も確認する。
+/// Test 1: lossless guarantee (the core guarantee of this tool).
+/// Because of the in-place replacement approach, the file length must not
+/// change and the differing bytes must be confined to the value areas of the
+/// target date-time tags inside APP1 (19 bytes x 3 locations), verified byte
+/// by byte. Additionally verifies that the scan data is identical and the
+/// decoded pixel arrays match bit for bit.
 #[test]
 fn test_lossless_bytes_and_pixels() {
     let dir = setup(&["a.jpg", "b.jpg"]);
@@ -88,11 +90,11 @@ fn test_lossless_bytes_and_pixels() {
     run_all(dir.path());
     let after = fs::read(&target).unwrap();
 
-    // b.jpg はインデックス 1 なので +1 秒され、必ず差分が生じる
-    assert_ne!(before, after, "書き換えが行われていない");
-    assert_eq!(before.len(), after.len(), "ファイル長が変化した");
+    // b.jpg is index 1, so it gets +1 second and must differ
+    assert_ne!(before, after, "no rewrite happened");
+    assert_eq!(before.len(), after.len(), "file length changed");
 
-    // 差分バイトの位置がすべて対象タグの値領域に収まっていること
+    // Every differing byte must fall inside a target tag's value area
     let offsets = lapse::exif_patch::find_datetime_offsets(&before).unwrap();
     let allowed: Vec<std::ops::Range<usize>> = offsets
         .all()
@@ -103,30 +105,31 @@ fn test_lossless_bytes_and_pixels() {
         if b != a {
             assert!(
                 allowed.iter().any(|r| r.contains(&i)),
-                "日時タグ以外の位置 {i} に差分がある (0x{b:02X} -> 0x{a:02X})"
+                "diff outside the date-time tags at position {i} (0x{b:02X} -> 0x{a:02X})"
             );
         }
     }
 
-    // スキャンデータ（エントロピー符号化部分）がバイト単位で完全一致すること
+    // The scan data (entropy-coded section) must be byte-identical
     assert_eq!(
         scan_data(&before),
         scan_data(&after),
-        "スキャンデータが変化した（再エンコードの疑い）"
+        "scan data changed (suspected re-encode)"
     );
 
-    // デコード後のピクセル配列がビット単位で一致すること
+    // The decoded pixel arrays must match bit for bit
     let pixels_before = image::load_from_memory(&before).unwrap().to_rgb8();
     let pixels_after = image::load_from_memory(&after).unwrap().to_rgb8();
     assert_eq!(
         pixels_before.as_raw(),
         pixels_after.as_raw(),
-        "デコード後のピクセルが変化した"
+        "decoded pixels changed"
     );
 }
 
-/// テスト 2: 日時タグ以外の EXIF タグ（Make, Model, ExifImageWidth/Height,
-/// GPS, MakerNote を含む全タグ）が処理前後で変化しないこと。
+/// Test 2: EXIF tags other than the date-times (all tags including Make,
+/// Model, ExifImageWidth/Height, GPS, MakerNote) must not change across
+/// processing.
 #[test]
 fn test_other_exif_tags_preserved() {
     let dir = setup(&["a.jpg", "b.jpg"]);
@@ -136,49 +139,51 @@ fn test_other_exif_tags_preserved() {
     run_all(dir.path());
     let after_fields = exif_fields(&fs::read(&target).unwrap());
 
-    // タグ集合が一致（消えたタグ・増えたタグがない）こと
+    // The tag sets must match (no tags disappeared or appeared)
     let before_keys: Vec<_> = before_fields.keys().collect();
     let after_keys: Vec<_> = after_fields.keys().collect();
-    assert_eq!(before_keys, after_keys, "タグ集合が変化した");
+    assert_eq!(before_keys, after_keys, "tag set changed");
 
-    // 日時タグ (DateTimeOriginal / DateTimeDigitized / DateTime) 以外は値も一致すること
+    // Values other than the date-time tags (DateTimeOriginal /
+    // DateTimeDigitized / DateTime) must also match
     for (key, before_value) in &before_fields {
         if key.contains("DateTime") {
             continue;
         }
         assert_eq!(
             before_value, &after_fields[key],
-            "日時以外のタグ {key} の値が変化した"
+            "non-date-time tag {key} changed"
         );
     }
 
-    // 主要タグとサンプルに含めた GPS / MakerNote の存在確認
+    // Presence checks for the main tags and the GPS / MakerNote in the sample
     let has = |name: &str| before_fields.keys().any(|k| k.contains(name));
     let value_of = |name: &str| {
         after_fields
             .iter()
             .find(|(k, _)| k.contains(name))
             .map(|(_, v)| v.clone())
-            .unwrap_or_else(|| panic!("{name} がない"))
+            .unwrap_or_else(|| panic!("{name} is missing"))
     };
     assert!(value_of("Make").contains(common::MAKE));
     assert!(value_of("Model").contains(common::MODEL));
     assert_eq!(value_of("PixelXDimension"), common::WIDTH.to_string());
     assert_eq!(value_of("PixelYDimension"), common::HEIGHT.to_string());
-    assert!(has("GPSLatitude"), "GPSLatitude が消えた");
-    assert!(has("MakerNote"), "MakerNote が消えた");
+    assert!(has("GPSLatitude"), "GPSLatitude disappeared");
+    assert!(has("MakerNote"), "MakerNote disappeared");
 }
 
-/// テスト 3: 同一秒に潰れた連写の DateTimeOriginal が
-/// 「新時刻 = max(元の時刻, 直前の新時刻 + 1 秒)」で一意化されること。
-/// 自然順ソート (img_1 < img_2 < img_10) と分の繰り上がり、
-/// YYYY:MM:DD HH:MM:SS フォーマット、0x9004 / 0x0132 の同期も検証する。
+/// Test 3: DateTimeOriginal of burst shots collapsed into the same second is
+/// uniquified as "new time = max(original time, previous new time + 1 second)".
+/// Also verifies natural sort (img_1 < img_2 < img_10), minute carry-over,
+/// the YYYY:MM:DD HH:MM:SS format, and 0x9004 / 0x0132 sync.
 #[test]
 fn test_datetime_updated_in_natural_order() {
     let dir = setup(&["img_2.jpg", "img_10.jpg", "img_1.jpg"]);
     run_all(dir.path());
 
-    // 全ファイル同一秒 (2024:01:02 03:04:59) なので +0, +1, +2 秒に押し出される
+    // All files share the same second (2024:01:02 03:04:59), so they are
+    // pushed to +0, +1, +2 seconds
     let expected = [
         ("img_1.jpg", "2024:01:02 03:04:59"),
         ("img_2.jpg", "2024:01:02 03:05:00"),
@@ -187,15 +192,15 @@ fn test_datetime_updated_in_natural_order() {
     for (name, want) in expected {
         let buf = fs::read(dir.path().join(name)).unwrap();
         let dto = read_ascii_tag(&buf, exif::Tag::DateTimeOriginal);
-        assert_eq!(dto, want, "{name} の DateTimeOriginal が期待値と異なる");
+        assert_eq!(dto, want, "unexpected DateTimeOriginal for {name}");
         assert_exif_datetime_format(&dto);
-        // CreateDate (DateTimeDigitized) と ModifyDate (DateTime) も同じ値に揃う
+        // CreateDate (DateTimeDigitized) and ModifyDate (DateTime) are synced
         assert_eq!(read_ascii_tag(&buf, exif::Tag::DateTimeDigitized), want);
         assert_eq!(read_ascii_tag(&buf, exif::Tag::DateTime), want);
     }
 }
 
-/// テスト 4: 処理後のファイルが依然として有効な JPEG としてデコードできること。
+/// Test 4: processed files must still decode as valid JPEGs.
 #[test]
 fn test_file_still_valid_jpeg() {
     let dir = setup(&["a.jpg", "b.jpg", "c.jpg"]);
@@ -203,14 +208,14 @@ fn test_file_still_valid_jpeg() {
 
     for name in ["a.jpg", "b.jpg", "c.jpg"] {
         let buf = fs::read(dir.path().join(name)).unwrap();
-        let img = image::load_from_memory(&buf)
-            .unwrap_or_else(|e| panic!("{name} をデコードできない: {e}"));
+        let img =
+            image::load_from_memory(&buf).unwrap_or_else(|e| panic!("cannot decode {name}: {e}"));
         assert_eq!(img.width(), common::WIDTH);
         assert_eq!(img.height(), common::HEIGHT);
     }
 }
 
-/// --dry-run ではファイルが 1 バイトも変化しないこと。
+/// With --dry-run, not a single byte of any file changes.
 #[test]
 fn test_dry_run_does_not_modify_files() {
     let dir = setup(&["a.jpg", "b.jpg"]);
@@ -226,24 +231,25 @@ fn test_dry_run_does_not_modify_files() {
     assert_eq!(before_b, fs::read(dir.path().join("b.jpg")).unwrap());
 }
 
-/// 対象 0 件は明確なエラー、DateTimeOriginal のないファイルは
-/// ファイル単位のエラーとして収集されること。
+/// Zero targets is a clear error; files without DateTimeOriginal are
+/// collected as per-file errors.
 #[test]
 fn test_error_cases() {
     let empty = tempfile::tempdir().unwrap();
     let err = run(empty.path(), &Options { dry_run: false }).unwrap_err();
-    assert!(err.to_string().contains("見つかりません"), "{err:#}");
+    assert!(err.to_string().contains("no target JPEG files"), "{err:#}");
 
     let no_exif = tempfile::tempdir().unwrap();
     fs::write(no_exif.path().join("a.jpg"), common::plain_jpeg()).unwrap();
     let summary = run(no_exif.path(), &Options { dry_run: false }).unwrap();
     assert_eq!(summary.results.len(), 1);
-    // EXIF セグメント自体がないので APP1 が見つからない旨のエラーになる
+    // There is no EXIF segment at all, so the error says APP1 was not found
     let err = summary.results[0].1.as_ref().unwrap_err();
     assert!(format!("{err:#}").contains("Exif"), "{err:#}");
 }
 
-/// 1 ファイルの失敗が全体を止めず、他ファイルは正しく処理されること。
+/// One file's failure does not stop the whole run; other files are processed
+/// correctly.
 #[test]
 fn test_single_file_failure_does_not_stop_others() {
     let dir = setup(&["a.jpg", "c.jpg"]);
@@ -252,10 +258,10 @@ fn test_single_file_failure_does_not_stop_others() {
     let summary = run(dir.path(), &Options { dry_run: false }).unwrap();
     assert_eq!(summary.results.len(), 3);
     assert!(summary.results[0].1.is_ok()); // a.jpg
-    assert!(summary.results[1].1.is_err()); // b.jpg (EXIF なし)
+    assert!(summary.results[1].1.is_err()); // b.jpg (no EXIF)
     assert!(summary.results[2].1.is_ok()); // c.jpg
 
-    // b.jpg は割り当てから除外され、c.jpg は a.jpg の直後 (+1 秒) になる
+    // b.jpg is excluded from assignment; c.jpg comes right after a.jpg (+1s)
     let buf = fs::read(dir.path().join("c.jpg")).unwrap();
     assert_eq!(
         read_ascii_tag(&buf, exif::Tag::DateTimeOriginal),
@@ -263,29 +269,30 @@ fn test_single_file_failure_does_not_stop_others() {
     );
 }
 
-/// 別シーン（時間の隙間がある写真）の元時刻は保たれ、
-/// 押し出しが追いついた場合だけ最小限後ろにずれること。
+/// Original times of separate scenes (photos with a time gap) are preserved,
+/// and a scene is pushed back minimally only when the push-out catches up.
 #[test]
 fn test_scene_times_preserved_and_pushed_only_when_caught_up() {
     let dir = tempfile::tempdir().unwrap();
     let write = |name: &str, dt: &str| {
         fs::write(dir.path().join(name), common::sample_jpeg_with(dt)).unwrap();
     };
-    // 連写 3 枚 (同一秒) + 追いつかれる写真 + 十分未来の別シーン 2 枚
+    // 3 burst shots (same second) + one photo that gets caught up
+    // + 2 photos of a scene far enough in the future
     write("img_1.jpg", "2024:01:02 03:04:59");
     write("img_2.jpg", "2024:01:02 03:04:59");
     write("img_3.jpg", "2024:01:02 03:04:59");
-    write("img_4.jpg", "2024:01:02 03:05:00"); // 押し出しに追いつかれる
-    write("img_5.jpg", "2024:01:02 04:00:00"); // 隙間があるので保たれる
-    write("img_6.jpg", "2024:01:02 04:00:00"); // 直前と同一秒なので +1 秒
+    write("img_4.jpg", "2024:01:02 03:05:00"); // caught up by the push-out
+    write("img_5.jpg", "2024:01:02 04:00:00"); // preserved thanks to the gap
+    write("img_6.jpg", "2024:01:02 04:00:00"); // same second as previous, so +1s
     run_all(dir.path());
 
     let expected = [
-        ("img_1.jpg", "2024:01:02 03:04:59"), // 先頭は元のまま
+        ("img_1.jpg", "2024:01:02 03:04:59"), // first file keeps its original time
         ("img_2.jpg", "2024:01:02 03:05:00"),
         ("img_3.jpg", "2024:01:02 03:05:01"),
-        ("img_4.jpg", "2024:01:02 03:05:02"), // 元時刻 03:05:00 だが追いつかれて押し出し
-        ("img_5.jpg", "2024:01:02 04:00:00"), // 元時刻がそのまま残る
+        ("img_4.jpg", "2024:01:02 03:05:02"), // originally 03:05:00 but caught up and pushed
+        ("img_5.jpg", "2024:01:02 04:00:00"), // original time preserved
         ("img_6.jpg", "2024:01:02 04:00:01"),
     ];
     for (name, want) in expected {
@@ -293,12 +300,12 @@ fn test_scene_times_preserved_and_pushed_only_when_caught_up() {
         assert_eq!(
             read_ascii_tag(&buf, exif::Tag::DateTimeOriginal),
             want,
-            "{name} の DateTimeOriginal が期待値と異なる"
+            "unexpected DateTimeOriginal for {name}"
         );
     }
 }
 
-/// 既に一意な時刻のディレクトリでは何も変更されないこと（冪等性）。
+/// Nothing changes in a directory whose times are already unique (idempotency).
 #[test]
 fn test_idempotent_when_already_unique() {
     let dir = tempfile::tempdir().unwrap();
@@ -321,7 +328,8 @@ fn test_idempotent_when_already_unique() {
     assert_eq!(before_b, fs::read(dir.path().join("b.jpg")).unwrap());
 }
 
-/// 拡張子フィルタ: .jpg / .jpeg（大文字小文字不問）のみ対象で、他形式は無視されること。
+/// Extension filter: only .jpg / .jpeg (case-insensitive) are targeted; other
+/// formats are ignored.
 #[test]
 fn test_collect_jpegs_filters_and_sorts() {
     let dir = tempfile::tempdir().unwrap();
@@ -336,7 +344,8 @@ fn test_collect_jpegs_filters_and_sorts() {
     assert_eq!(names, vec!["a.jpeg", "b.JPG"]);
 }
 
-/// CLI (--dry-run) の動作確認: 予定タイムスタンプが表示され、ファイルは変化しないこと。
+/// CLI (--dry-run) behavior: the planned timestamps are printed and the files
+/// do not change.
 #[test]
 fn test_cli_dry_run() {
     let dir = setup(&["img_1.jpg", "img_2.jpg"]);
@@ -351,7 +360,7 @@ fn test_cli_dry_run() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("img_1.jpg"), "{stdout}");
     assert!(stdout.contains("2024:01:02 03:05:00"), "{stdout}");
-    assert!(stdout.contains("2 件のファイルを書き換え予定"), "{stdout}");
+    assert!(stdout.contains("2 file(s) would be rewritten"), "{stdout}");
 
     assert_eq!(before, fs::read(dir.path().join("img_2.jpg")).unwrap());
 }

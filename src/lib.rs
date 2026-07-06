@@ -1,10 +1,12 @@
-//! Google フォトが連写写真のサブ秒タイムスタンプを無視して同一秒内の順序を
-//! 保持しない問題を回避するため、ディレクトリ直下の JPEG の DateTimeOriginal を
-//! ファイル名の自然順で秒単位に一意化するライブラリ。
+//! Library that uniquifies the DateTimeOriginal of JPEGs directly under a
+//! directory at second granularity in natural filename order, to work around
+//! Google Photos ignoring sub-second timestamps of burst photos and not
+//! preserving the order within the same second.
 //!
-//! 割り当てルール: 新時刻 = max(元の時刻, 直前のファイルの新時刻 + 1 秒)。
-//! 同一秒に潰れた連写だけが最小限ずらされ、別シーンとの間に時間の隙間が
-//! あればそのシーンの元の撮影時刻はそのまま保たれる。
+//! Assignment rule: new time = max(original time, previous file's new time + 1 second).
+//! Only burst shots collapsed into the same second are shifted minimally; if
+//! there is a time gap before another scene, that scene's original capture
+//! time is preserved as is.
 
 mod exif_datetime;
 pub mod exif_patch;
@@ -18,29 +20,30 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub struct Options {
-    /// true なら書き換えを行わず、割り当て予定の日時だけを計算する
+    /// If true, do not rewrite; only compute the date-times to be assigned
     pub dry_run: bool,
 }
 
-/// 1 ファイルの処理結果（変更前後の DateTimeOriginal）
+/// Result of processing one file (DateTimeOriginal before/after)
 #[derive(Debug)]
 pub struct FileOutcome {
     pub old: ExifDateTime,
     pub new: ExifDateTime,
 }
 
-/// 全ファイルの処理結果。処理順（自然順ソート順）を保持する。
+/// Results for all files, kept in processing order (natural sort order).
 #[derive(Debug)]
 pub struct Summary {
     pub results: Vec<(PathBuf, Result<FileOutcome>)>,
 }
 
-/// 指定ディレクトリ直下の JPEG (.jpg / .jpeg、大文字小文字不問) を
-/// ファイル名の自然順ソートで列挙する。RAW 等の他形式は無視する。
-/// サブディレクトリは再帰しない（将来 --recursive を足すならここを拡張する）。
+/// Enumerates the JPEGs (.jpg / .jpeg, case-insensitive) directly under the
+/// given directory in natural filename order. Other formats such as RAW are
+/// ignored. Subdirectories are not recursed (extend here if --recursive is
+/// ever added).
 pub fn collect_jpegs(dir: &Path) -> Result<Vec<PathBuf>> {
     let entries = fs::read_dir(dir)
-        .with_context(|| format!("ディレクトリを読めません: {}", dir.display()))?;
+        .with_context(|| format!("failed to read directory: {}", dir.display()))?;
     let mut named: Vec<(String, PathBuf)> = Vec::new();
     for entry in entries {
         let path = entry?.path();
@@ -61,24 +64,26 @@ pub fn collect_jpegs(dir: &Path) -> Result<Vec<PathBuf>> {
             .unwrap_or_default();
         named.push((name, path));
     }
-    // 自然順ソート: image_2.jpg が image_10.jpg より前に来るよう、
-    // 数値部分を数値として比較する (natord)。単純な辞書順にはしない。
+    // Natural sort: compare numeric parts as numbers (natord) so that
+    // image_2.jpg comes before image_10.jpg. Not plain lexicographic order.
     named.sort_by(|a, b| natord::compare(&a.0, &b.0));
     Ok(named.into_iter().map(|(_, p)| p).collect())
 }
 
-/// ディレクトリ内の JPEG を処理する。
+/// Processes the JPEGs in a directory.
 ///
-/// 1. 自然順ソートで対象を確定し、各ファイルの元の DateTimeOriginal を並列で読む
-/// 2. ソート順に「新時刻 = max(元の時刻, 直前の新時刻 + 1 秒)」を逐次確定する
-///    （先頭は元の時刻のまま。同一秒に潰れたファイルだけが押し出され、
-///    時間の隙間があるシーンの元時刻は保たれる）
-/// 3. 各ファイルの書き換え・保存を並列実行する
-///    （割り当て時刻は手順 2 で確定済みなので、並列化で順序がずれることはない）
+/// 1. Fix the targets by natural sort, then read each file's original
+///    DateTimeOriginal in parallel
+/// 2. In sort order, sequentially finalize "new time = max(original time,
+///    previous new time + 1 second)" (the first file keeps its original time;
+///    only files collapsed into the same second are pushed forward, and
+///    original times of scenes with time gaps are preserved)
+/// 3. Rewrite and save each file in parallel (the assigned times are already
+///    fixed in step 2, so parallelism cannot reorder them)
 pub fn run(dir: &Path, opts: &Options) -> Result<Summary> {
     let files = collect_jpegs(dir)?;
     if files.is_empty() {
-        bail!("対象の JPEG ファイルが見つかりません: {}", dir.display());
+        bail!("no target JPEG files found in: {}", dir.display());
     }
 
     let originals: Vec<(PathBuf, Result<ExifDateTime>)> = files
@@ -89,7 +94,8 @@ pub fn run(dir: &Path, opts: &Options) -> Result<Summary> {
         })
         .collect();
 
-    // 元時刻を読めなかったファイルは割り当てから除外し、エラーとして収集する
+    // Files whose original time cannot be read are excluded from assignment
+    // and collected as errors
     let mut prev: Option<ExifDateTime> = None;
     let jobs: Vec<(PathBuf, Result<ExifDateTime>)> = originals
         .into_iter()
@@ -106,7 +112,7 @@ pub fn run(dir: &Path, opts: &Options) -> Result<Summary> {
         })
         .collect();
 
-    // 1 ファイルの失敗で全体を止めず、ファイル単位で Result を収集する
+    // One file's failure does not stop the whole run; collect a Result per file
     let results: Vec<(PathBuf, Result<FileOutcome>)> = jobs
         .into_par_iter()
         .map(|(path, assigned)| {
@@ -119,15 +125,15 @@ pub fn run(dir: &Path, opts: &Options) -> Result<Summary> {
 }
 
 fn read_original_datetime(path: &Path) -> Result<ExifDateTime> {
-    let buf = fs::read(path).with_context(|| format!("読み込みに失敗: {}", path.display()))?;
+    let buf = fs::read(path).with_context(|| format!("failed to read: {}", path.display()))?;
     exif_patch::read_datetime_original(&buf)
 }
 
 fn process_file(path: &Path, new: ExifDateTime, dry_run: bool) -> Result<FileOutcome> {
-    let mut buf = fs::read(path).with_context(|| format!("読み込みに失敗: {}", path.display()))?;
+    let mut buf = fs::read(path).with_context(|| format!("failed to read: {}", path.display()))?;
     let offsets = exif_patch::find_datetime_offsets(&buf)?;
     let old = exif_patch::read_datetime_at(&buf, offsets.datetime_original)?;
-    // 全対象タグが既に割り当て時刻と一致していれば書き込み自体をスキップする
+    // Skip writing entirely if every target tag already matches the assigned time
     let new_bytes = new.to_exif_bytes();
     let unchanged = offsets
         .all()
@@ -142,19 +148,20 @@ fn process_file(path: &Path, new: ExifDateTime, dry_run: bool) -> Result<FileOut
     Ok(FileOutcome { old, new })
 }
 
-/// 書き込み途中でクラッシュしても元ファイルが壊れないよう、
-/// 同一ディレクトリのテンポラリファイルに書き切ってから rename で置き換える。
+/// Writes the whole file to a temporary file in the same directory and then
+/// replaces the original via rename, so a crash mid-write never corrupts the
+/// original file.
 fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     let dir = path
         .parent()
-        .with_context(|| format!("親ディレクトリを特定できません: {}", path.display()))?;
+        .with_context(|| format!("cannot determine parent directory of: {}", path.display()))?;
     let permissions = fs::metadata(path)?.permissions();
     let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
     tmp.write_all(data)?;
     tmp.as_file().sync_all()?;
     tmp.persist(path)
         .map_err(|e| e.error)
-        .with_context(|| format!("上書き保存に失敗: {}", path.display()))?;
+        .with_context(|| format!("failed to overwrite: {}", path.display()))?;
     fs::set_permissions(path, permissions)?;
     Ok(())
 }

@@ -3,20 +3,21 @@ use lapse::Options;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-/// 連写 JPEG の DateTimeOriginal をファイル名の自然順で秒単位に一意化し、
-/// Google フォトで撮影順が保たれるようにするツール。
-/// 同一秒に潰れた写真だけを最小限ずらし、時間の隙間がある別シーンの時刻は保つ。
+/// Uniquifies the DateTimeOriginal of burst JPEGs at second granularity in
+/// natural filename order so that Google Photos keeps the shooting order.
+/// Only photos collapsed into the same second are shifted minimally; times of
+/// separate scenes with time gaps are preserved.
 #[derive(Parser)]
 #[command(version, about)]
 struct Args {
-    /// 対象ディレクトリ（直下の .jpg / .jpeg のみ。サブディレクトリは再帰しない）
+    /// Target directory (only .jpg / .jpeg directly under it; subdirectories are not recursed)
     dir: PathBuf,
 
-    /// 実際には書き換えず、設定される予定の新しいタイムスタンプを一覧表示する
+    /// Do not rewrite anything; list the new timestamps that would be set
     #[arg(long)]
     dry_run: bool,
 
-    /// 処理したファイルと変更前後の時刻を表示する
+    /// Print each processed file with its before/after times
     #[arg(long)]
     verbose: bool,
 }
@@ -31,7 +32,7 @@ fn main() -> ExitCode {
     ) {
         Ok(summary) => summary,
         Err(e) => {
-            eprintln!("エラー: {e:#}");
+            eprintln!("error: {e:#}");
             return ExitCode::FAILURE;
         }
     };
@@ -58,13 +59,13 @@ fn main() -> ExitCode {
     }
 
     if args.dry_run {
-        println!("{succeeded} 件のファイルを書き換え予定");
+        println!("{succeeded} file(s) would be rewritten");
     } else {
-        println!("{succeeded} 件のファイルを書き換えました");
+        println!("rewrote {succeeded} file(s)");
     }
 
     if !failures.is_empty() {
-        eprintln!("{} 件のファイルで失敗:", failures.len());
+        eprintln!("{} file(s) failed:", failures.len());
         for (path, result) in &failures {
             if let Err(e) = result {
                 eprintln!("  {}: {e:#}", path.display());

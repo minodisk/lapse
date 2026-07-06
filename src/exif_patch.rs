@@ -1,38 +1,44 @@
-//! JPEG の APP1(Exif) セグメント内にある日時タグの ASCII 値を、
-//! 長さを変えずにインプレースで直接上書きするための最小 EXIF パーサ。
+//! Minimal EXIF parser for overwriting the ASCII values of date-time tags
+//! inside a JPEG's APP1 (Exif) segment directly in place, without changing
+//! their length.
 //!
-//! # crate 選定メモ
+//! # Crate selection notes
 //!
-//! - `kamadak-exif` は EXIF の読み取り専用で書き込みができない。
-//! - `little_exif` や `img-parts` を使う書き込みは APP1 セグメントの再構築を伴い、
-//!   MakerNote 内の絶対オフセット破損や、日時以外のタグへの副作用のリスクがある。
-//! - EXIF の日時は "YYYY:MM:DD HH:MM:SS" の固定 19 バイト（NUL 終端込みで 20 バイト）で、
-//!   書き換え前後で長さが変わらない。そのため該当タグの値領域だけをバイト単位で
-//!   上書きすれば、画像スキャンデータを含むファイルの他の部分に一切触れずに済む。
+//! - `kamadak-exif` is read-only and cannot write EXIF.
+//! - Writing via `little_exif` or `img-parts` rebuilds the APP1 segment,
+//!   which risks corrupting absolute offsets inside MakerNote and causing
+//!   side effects on tags other than the date-times.
+//! - An EXIF date-time is a fixed 19 bytes, "YYYY:MM:DD HH:MM:SS" (20 bytes
+//!   including the NUL terminator), so its length never changes across a
+//!   rewrite. Overwriting just the value area of the target tags therefore
+//!   leaves every other part of the file — including the image scan data —
+//!   completely untouched.
 //!
-//! 以上から、外部 crate の書き込み機能には頼らず、APP1 内の該当 ASCII 値を
-//! インプレース置換する自前の最小 TIFF/IFD ウォーカーを実装している。
-//! これにより「差分バイトが対象タグの値領域のみ」であることをテストで保証できる。
+//! For these reasons, instead of relying on external crates' write support,
+//! we implement our own minimal TIFF/IFD walker that replaces the target
+//! ASCII values inside APP1 in place. This lets tests guarantee that "the
+//! differing bytes are confined to the target tags' value areas".
 
 use crate::ExifDateTime;
 use anyhow::{bail, ensure, Context, Result};
 
-/// EXIF 日時 "YYYY:MM:DD HH:MM:SS" の長さ（NUL 終端を含まない）
+/// Length of an EXIF date-time "YYYY:MM:DD HH:MM:SS" (excluding the NUL terminator)
 pub const DATETIME_LEN: usize = 19;
 
-/// 書き換え対象の日時タグ値の、ファイル先頭からの絶対バイトオフセット。
+/// Absolute byte offsets (from the start of the file) of the date-time tag
+/// values to be rewritten.
 #[derive(Debug)]
 pub struct DateTimeOffsets {
-    /// DateTimeOriginal (0x9003, Exif IFD)。必須。
+    /// DateTimeOriginal (0x9003, Exif IFD). Required.
     pub datetime_original: usize,
-    /// DateTimeDigitized / CreateDate (0x9004, Exif IFD)。存在すれば揃える。
+    /// DateTimeDigitized / CreateDate (0x9004, Exif IFD). Synced when present.
     pub datetime_digitized: Option<usize>,
-    /// DateTime / ModifyDate (0x0132, IFD0)。存在すれば揃える。
+    /// DateTime / ModifyDate (0x0132, IFD0). Synced when present.
     pub datetime: Option<usize>,
 }
 
 impl DateTimeOffsets {
-    /// 書き換え対象となる全オフセット
+    /// All offsets to be rewritten
     pub fn all(&self) -> Vec<usize> {
         let mut v = vec![self.datetime_original];
         v.extend(self.datetime_digitized);
@@ -41,9 +47,9 @@ impl DateTimeOffsets {
     }
 }
 
-/// JPEG バッファから日時タグの値オフセットを探す。
-/// DateTimeOriginal が無い場合はエラー。0x9004 / 0x0132 は無ければ None
-/// （インプレース方式では存在しないタグを新規作成しない）。
+/// Finds the value offsets of the date-time tags in a JPEG buffer.
+/// Missing DateTimeOriginal is an error. 0x9004 / 0x0132 are None when absent
+/// (the in-place approach never creates tags that do not exist).
 pub fn find_datetime_offsets(buf: &[u8]) -> Result<DateTimeOffsets> {
     let (tiff_base, seg_end) = find_exif_tiff(buf)?;
     let tiff = Tiff::new(buf, tiff_base, seg_end)?;
@@ -59,7 +65,7 @@ pub fn find_datetime_offsets(buf: &[u8]) -> Result<DateTimeOffsets> {
         }
     }
 
-    let exif_ifd_off = exif_ifd_off.context("Exif IFD (タグ 0x8769) がありません")?;
+    let exif_ifd_off = exif_ifd_off.context("missing Exif IFD (tag 0x8769)")?;
     let mut datetime_original = None;
     let mut datetime_digitized = None;
     for e in tiff.ifd_entries(exif_ifd_off)? {
@@ -71,27 +77,27 @@ pub fn find_datetime_offsets(buf: &[u8]) -> Result<DateTimeOffsets> {
     }
 
     Ok(DateTimeOffsets {
-        datetime_original: datetime_original
-            .context("DateTimeOriginal (タグ 0x9003) がありません")?,
+        datetime_original: datetime_original.context("missing DateTimeOriginal (tag 0x9003)")?,
         datetime_digitized,
         datetime,
     })
 }
 
-/// DateTimeOriginal の現在値を読み取る。
+/// Reads the current value of DateTimeOriginal.
 pub fn read_datetime_original(buf: &[u8]) -> Result<ExifDateTime> {
     let offsets = find_datetime_offsets(buf)?;
     read_datetime_at(buf, offsets.datetime_original)
 }
 
-/// 指定オフセットにある 19 バイトの日時を読み取る。
+/// Reads the 19-byte date-time at the given offset.
 pub fn read_datetime_at(buf: &[u8], offset: usize) -> Result<ExifDateTime> {
     ExifDateTime::from_exif_bytes(&buf[offset..offset + DATETIME_LEN])
 }
 
-/// 見つかった日時タグの値領域（各 19 バイト）を新しい日時で上書きする。
-/// ExifDateTime は常に有効な 19 バイト表現を持つことが型で保証されるため
-/// 検証は不要で、バッファ長も変化しない。
+/// Overwrites the value areas (19 bytes each) of the found date-time tags
+/// with the new date-time. ExifDateTime is guaranteed by its type to always
+/// have a valid 19-byte representation, so no validation is needed and the
+/// buffer length never changes.
 pub fn patch_datetimes(buf: &mut [u8], offsets: &DateTimeOffsets, new: ExifDateTime) {
     let bytes = new.to_exif_bytes();
     for off in offsets.all() {
@@ -99,50 +105,51 @@ pub fn patch_datetimes(buf: &mut [u8], offsets: &DateTimeOffsets, new: ExifDateT
     }
 }
 
-/// JPEG セグメントを走査し、APP1(Exif) の
-/// (TIFF ヘッダの絶対オフセット, セグメント末尾の絶対オフセット) を返す。
+/// Walks the JPEG segments and returns the APP1 (Exif) segment's
+/// (absolute offset of the TIFF header, absolute offset of the segment end).
 fn find_exif_tiff(buf: &[u8]) -> Result<(usize, usize)> {
     ensure!(
         buf.len() >= 2 && buf[0] == 0xFF && buf[1] == 0xD8,
-        "JPEG ファイルではありません (SOI マーカーがない)"
+        "not a JPEG file (missing SOI marker)"
     );
     let mut pos = 2;
     while pos + 2 <= buf.len() {
         ensure!(
             buf[pos] == 0xFF,
-            "不正な JPEG セグメント構造 (offset {pos})"
+            "invalid JPEG segment structure (offset {pos})"
         );
         let marker = buf[pos + 1];
-        // fill byte (0xFF の連続) を許容
+        // Tolerate fill bytes (runs of 0xFF)
         if marker == 0xFF {
             pos += 1;
             continue;
         }
-        // SOS (スキャンデータ開始) 以降に EXIF は現れない
+        // EXIF never appears after SOS (start of scan data)
         if marker == 0xDA || marker == 0xD9 {
             break;
         }
-        // 長さフィールドを持たないスタンドアロンマーカー (TEM, RSTn)
+        // Standalone markers without a length field (TEM, RSTn)
         if marker == 0x01 || (0xD0..=0xD7).contains(&marker) {
             pos += 2;
             continue;
         }
-        ensure!(pos + 4 <= buf.len(), "セグメントヘッダが途中で切れています");
+        ensure!(pos + 4 <= buf.len(), "segment header is truncated");
         let len = u16::from_be_bytes([buf[pos + 2], buf[pos + 3]]) as usize;
         ensure!(
             len >= 2 && pos + 2 + len <= buf.len(),
-            "セグメント長がファイルサイズを超えています"
+            "segment length exceeds file size"
         );
         if marker == 0xE1 && len >= 2 + 6 + 8 && &buf[pos + 4..pos + 10] == b"Exif\0\0" {
-            // pos+10 が TIFF ヘッダの先頭、pos+2+len がセグメント末尾
+            // pos+10 is the start of the TIFF header, pos+2+len the segment end
             return Ok((pos + 10, pos + 2 + len));
         }
         pos += 2 + len;
     }
-    bail!("APP1(Exif) セグメントが見つかりません")
+    bail!("APP1 (Exif) segment not found")
 }
 
-/// TIFF 構造の読み取りヘルパ。オフセットはすべて TIFF ヘッダ (base) 相対。
+/// Helper for reading the TIFF structure. All offsets are relative to the
+/// TIFF header (base).
 struct Tiff<'a> {
     buf: &'a [u8],
     base: usize,
@@ -150,7 +157,8 @@ struct Tiff<'a> {
     little_endian: bool,
 }
 
-/// IFD エントリ。`value_field` は 4 バイトの値/オフセット領域の base 相対オフセット。
+/// An IFD entry. `value_field` is the base-relative offset of the 4-byte
+/// value/offset field.
 struct Entry {
     tag: u16,
     typ: u16,
@@ -160,14 +168,11 @@ struct Entry {
 
 impl<'a> Tiff<'a> {
     fn new(buf: &'a [u8], base: usize, end: usize) -> Result<Self> {
-        ensure!(
-            end <= buf.len() && end - base >= 8,
-            "TIFF ヘッダが短すぎます"
-        );
+        ensure!(end <= buf.len() && end - base >= 8, "TIFF header too short");
         let little_endian = match &buf[base..base + 2] {
             b"II" => true,
             b"MM" => false,
-            _ => bail!("TIFF バイトオーダーが不正です"),
+            _ => bail!("invalid TIFF byte order"),
         };
         let tiff = Tiff {
             buf,
@@ -175,13 +180,16 @@ impl<'a> Tiff<'a> {
             end,
             little_endian,
         };
-        ensure!(tiff.u16(2)? == 42, "TIFF マジックナンバーが不正です");
+        ensure!(tiff.u16(2)? == 42, "invalid TIFF magic number");
         Ok(tiff)
     }
 
     fn bytes(&self, rel: usize, n: usize) -> Result<&[u8]> {
         let abs = self.base + rel;
-        ensure!(abs + n <= self.end, "TIFF 構造がセグメント外を指しています");
+        ensure!(
+            abs + n <= self.end,
+            "TIFF structure points outside the segment"
+        );
         Ok(&self.buf[abs..abs + n])
     }
 
@@ -218,24 +226,25 @@ impl<'a> Tiff<'a> {
         Ok(entries)
     }
 
-    /// ASCII 日時タグの値領域の絶対オフセットを返す。
-    /// 日時は 19 文字 + NUL の 20 バイトで 4 バイトを超えるため、値は必ずオフセット参照。
+    /// Returns the absolute offset of an ASCII date-time tag's value area.
+    /// A date-time is 19 chars + NUL = 20 bytes, which exceeds 4 bytes, so the
+    /// value is always an offset reference.
     fn ascii_value_abs(&self, e: &Entry) -> Result<usize> {
         ensure!(
             e.typ == 2,
-            "日時タグ 0x{:04X} が ASCII 型ではありません",
+            "date-time tag 0x{:04X} is not ASCII type",
             e.tag
         );
         ensure!(
             e.count as usize >= DATETIME_LEN,
-            "日時タグ 0x{:04X} の長さが不正です",
+            "date-time tag 0x{:04X} has invalid length",
             e.tag
         );
         let off = self.u32(e.value_field)? as usize;
         let abs = self.base + off;
         ensure!(
             abs + DATETIME_LEN <= self.end,
-            "日時タグ 0x{:04X} の値がセグメント外を指しています",
+            "date-time tag 0x{:04X} value points outside the segment",
             e.tag
         );
         Ok(abs)
