@@ -1,58 +1,58 @@
 # lapse
 
-連写した JPEG の EXIF `DateTimeOriginal` をファイル名順に 1 秒ずつ進めて一意化する CLI ツールです。
+A CLI tool that makes the EXIF `DateTimeOriginal` of burst-shot JPEGs unique by advancing them 1 second at a time in filename order.
 
-Google フォトは連写写真のサブ秒タイムスタンプ（`SubSecTimeOriginal`）を無視するため、同一秒内に撮影された写真の表示順が保持されません。このツールでアップロード前にタイムスタンプを秒単位で一意化することで、撮影順どおりに並ぶようになります。
+Google Photos ignores the sub-second timestamps (`SubSecTimeOriginal`) of burst photos, so photos taken within the same second do not keep their display order. By making the timestamps unique at second granularity before uploading, this tool ensures the photos are ordered as shot.
 
-## 動作
+## Behavior
 
-1. 指定ディレクトリ**直下**の JPEG（`.jpg` / `.jpeg`、大文字小文字不問）を集める。サブディレクトリは再帰しない。
-2. ファイル名の**自然順ソート**で並べる（`image_2.jpg` は `image_10.jpg` より前）。
-3. ソート順に「**新時刻 = max(元の時刻, 直前のファイルの新時刻 + 1 秒)**」を割り当てる。先頭は元の時刻のまま。同一秒に潰れた連写だけが 1 秒ずつ後ろに押し出され、時間の隙間がある別シーンの元の撮影時刻はそのまま保たれる（押し出しが次のシーンに追いついた場合だけ、そのシーンが必要最小限ずれる）。順序はファイル名順で常に単調増加になる。
-4. `DateTimeOriginal` (0x9003) に加え、`DateTimeDigitized` (0x9004) と `DateTime` (0x0132) が存在すれば同じ値に揃える（存在しないタグは作らない）。ファイルは上書き保存する。変更が不要なファイル（既に一意）は書き込み自体をスキップするため、再実行は冪等。
+1. Collects the JPEGs (`.jpg` / `.jpeg`, case-insensitive) **directly under** the given directory. Subdirectories are not recursed into.
+2. Sorts them by **natural filename order** (`image_2.jpg` comes before `image_10.jpg`).
+3. Assigns, in sort order, **new time = max(original time, previous file's new time + 1 second)**. The first file keeps its original time. Only burst shots collapsed into the same second are pushed forward 1 second at a time; original capture times of separate scenes with time gaps are preserved (only when a push-out catches up with the next scene is that scene shifted by the minimum necessary amount). The order is always monotonically increasing by filename.
+4. In addition to `DateTimeOriginal` (0x9003), `DateTimeDigitized` (0x9004) and `DateTime` (0x0132) are set to the same value if they exist (missing tags are not created). Files are saved in place. Files that need no change (already unique) are not written at all, so re-running is idempotent.
 
-### 無劣化保証
+### Lossless guarantee
 
-EXIF の書き換えは **APP1 セグメント内の該当タグ値（固定 19 バイト）のインプレース置換**で行います。JPEG のデコード・再構築は一切行わないため、画像スキャンデータを含む他の全バイトは処理前後で完全に一致します（テストで保証）。書き込みはテンポラリファイルへ書いてからアトミックに rename するため、途中でクラッシュしても元ファイルは壊れません。
+The EXIF rewrite is done by **in-place replacement of the target tag values (fixed 19 bytes) inside the APP1 segment**. The JPEG is never decoded or rebuilt, so every other byte — including the image scan data — is bit-identical before and after processing (guaranteed by tests). Writes go to a temporary file followed by an atomic rename, so a crash mid-write never corrupts the original file.
 
-## インストール
+## Installation
 
 ```sh
 cargo install --path .
 ```
 
-## 使い方
+## Usage
 
-破壊的操作なので、まず `--dry-run` で書き込まれる予定のタイムスタンプを確認してください。
+This is a destructive operation, so first check the timestamps to be written with `--dry-run`.
 
 ```sh
-# 予定の確認（書き換えは行わない）
+# Preview (no rewriting)
 lapse --dry-run /path/to/photos
 
-# 実行
+# Run
 lapse /path/to/photos
 
-# 変更前後の時刻を表示しながら実行
+# Run while printing before/after timestamps
 lapse --verbose /path/to/photos
 ```
 
-対象の JPEG が 0 件の場合はエラーになります。`DateTimeOriginal` を読めないファイル（EXIF がない等）はそのファイルだけスキップされ、最後にサマリ表示されます（終了コード 1）。
+If no target JPEGs are found, the command fails. Files whose `DateTimeOriginal` cannot be read (e.g. no EXIF) are skipped individually and summarized at the end (exit code 1).
 
-## テスト
+## Testing
 
 ```sh
 cargo test
 ```
 
-テスト用のサンプル JPEG（Make / Model / 日時 3 種 / GPS / MakerNote 入りの EXIF 付き）はテスト内で生成され、以下を検証します。
+Sample JPEGs for testing (with EXIF containing Make / Model / all three date-time tags / GPS / MakerNote) are generated inside the tests, which verify:
 
-1. **無劣化保証**: 処理前後でファイル長が不変で、差分バイトが対象日時タグの値領域（19 バイト × 3 箇所）のみに収まること。スキャンデータ（エントロピー符号化部分）のバイト完全一致と、デコード後ピクセル配列のビット単位一致。
-2. **EXIF 他タグ保持**: 日時タグ以外の全タグ（GPS・MakerNote 含む）が値・集合ともに不変であること。
-3. **対象タグ更新**: `DateTimeOriginal` が「基準時刻 + インデックス秒」になり、`YYYY:MM:DD HH:MM:SS` フォーマットであること。自然順ソートと分の繰り上がりも検証。
-4. **ファイル整合性**: 処理後も有効な JPEG としてデコードできること。
+1. **Lossless guarantee**: the file length is unchanged and the differing bytes are confined to the value areas of the target date-time tags (19 bytes × 3 locations). The scan data (entropy-coded section) is byte-identical, and the decoded pixel arrays match bit for bit.
+2. **Other EXIF tags preserved**: all tags other than the date-time tags (including GPS and MakerNote) are unchanged in both value and set.
+3. **Target tag update**: `DateTimeOriginal` becomes "base time + index seconds" in `YYYY:MM:DD HH:MM:SS` format. Natural-order sorting and minute carry-over are also verified.
+4. **File integrity**: the file still decodes as a valid JPEG after processing.
 
-## 実装メモ
+## Implementation notes
 
-- 純 Rust 実装。ExifTool 等の外部プロセスには依存しません。
-- EXIF 書き込み系 crate（`little_exif` 等）はセグメント再構築を伴い MakerNote のオフセット破損リスクがあるため使わず、自前の最小 TIFF/IFD パーサでタグ値のオフセットを特定してインプレース置換しています（`src/exif_patch.rs` 冒頭の選定メモ参照）。
-- 秒の割り当てはソート後に逐次確定し、ファイル I/O と書き換えのみを rayon で並列化しています。
+- Pure Rust implementation. No dependency on external processes such as ExifTool.
+- EXIF-writing crates (`little_exif` etc.) rebuild segments and risk corrupting MakerNote offsets, so instead a minimal in-house TIFF/IFD parser locates the tag value offsets for in-place replacement (see the selection notes at the top of `src/exif_patch.rs`).
+- Second assignment is finalized sequentially after sorting; only file I/O and rewriting are parallelized with rayon.
