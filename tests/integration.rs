@@ -220,7 +220,7 @@ fn test_dry_run_does_not_modify_files() {
     let summary = run(dir.path(), &Options { dry_run: true }).unwrap();
     assert!(summary.results.iter().all(|(_, r)| r.is_ok()));
     let outcome = summary.results[1].1.as_ref().unwrap();
-    assert_eq!(outcome.new, "2024:01:02 03:05:00");
+    assert_eq!(outcome.new.to_string(), "2024:01:02 03:05:00");
 
     assert_eq!(before_a, fs::read(dir.path().join("a.jpg")).unwrap());
     assert_eq!(before_b, fs::read(dir.path().join("b.jpg")).unwrap());

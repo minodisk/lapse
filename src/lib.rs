@@ -6,17 +6,16 @@
 //! 同一秒に潰れた連写だけが最小限ずらされ、別シーンとの間に時間の隙間が
 //! あればそのシーンの元の撮影時刻はそのまま保たれる。
 
+mod exif_datetime;
 pub mod exif_patch;
 
+pub use exif_datetime::{ExifDateTime, EXIF_DATETIME_FORMAT};
+
 use anyhow::{bail, Context, Result};
-use chrono::{Duration, NaiveDateTime};
 use rayon::prelude::*;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-
-/// EXIF 日時フォーマット "YYYY:MM:DD HH:MM:SS"（コロン区切り・固定 19 バイト）
-pub const EXIF_DATETIME_FORMAT: &str = "%Y:%m:%d %H:%M:%S";
 
 pub struct Options {
     /// true なら書き換えを行わず、割り当て予定の日時だけを計算する
@@ -26,8 +25,8 @@ pub struct Options {
 /// 1 ファイルの処理結果（変更前後の DateTimeOriginal）
 #[derive(Debug)]
 pub struct FileOutcome {
-    pub old: String,
-    pub new: String,
+    pub old: ExifDateTime,
+    pub new: ExifDateTime,
 }
 
 /// 全ファイルの処理結果。処理順（自然順ソート順）を保持する。
@@ -82,7 +81,7 @@ pub fn run(dir: &Path, opts: &Options) -> Result<Summary> {
         bail!("対象の JPEG ファイルが見つかりません: {}", dir.display());
     }
 
-    let originals: Vec<(PathBuf, Result<NaiveDateTime>)> = files
+    let originals: Vec<(PathBuf, Result<ExifDateTime>)> = files
         .into_par_iter()
         .map(|path| {
             let original = read_original_datetime(&path);
@@ -91,17 +90,17 @@ pub fn run(dir: &Path, opts: &Options) -> Result<Summary> {
         .collect();
 
     // 元時刻を読めなかったファイルは割り当てから除外し、エラーとして収集する
-    let mut prev: Option<NaiveDateTime> = None;
-    let jobs: Vec<(PathBuf, Result<String>)> = originals
+    let mut prev: Option<ExifDateTime> = None;
+    let jobs: Vec<(PathBuf, Result<ExifDateTime>)> = originals
         .into_iter()
         .map(|(path, original)| {
             let assigned = original.map(|t| {
                 let new = match prev {
-                    Some(p) => t.max(p + Duration::seconds(1)),
+                    Some(p) => t.max(p.succ()),
                     None => t,
                 };
                 prev = Some(new);
-                new.format(EXIF_DATETIME_FORMAT).to_string()
+                new
             });
             (path, assigned)
         })
@@ -111,7 +110,7 @@ pub fn run(dir: &Path, opts: &Options) -> Result<Summary> {
     let results: Vec<(PathBuf, Result<FileOutcome>)> = jobs
         .into_par_iter()
         .map(|(path, assigned)| {
-            let result = assigned.and_then(|new| process_file(&path, &new, opts.dry_run));
+            let result = assigned.and_then(|new| process_file(&path, new, opts.dry_run));
             (path, result)
         })
         .collect();
@@ -119,32 +118,28 @@ pub fn run(dir: &Path, opts: &Options) -> Result<Summary> {
     Ok(Summary { results })
 }
 
-fn read_original_datetime(path: &Path) -> Result<NaiveDateTime> {
+fn read_original_datetime(path: &Path) -> Result<ExifDateTime> {
     let buf = fs::read(path).with_context(|| format!("読み込みに失敗: {}", path.display()))?;
-    let s = exif_patch::read_datetime_original(&buf)?;
-    NaiveDateTime::parse_from_str(s.trim(), EXIF_DATETIME_FORMAT)
-        .with_context(|| format!("DateTimeOriginal を日時として解釈できません: {s:?}"))
+    exif_patch::read_datetime_original(&buf)
 }
 
-fn process_file(path: &Path, new: &str, dry_run: bool) -> Result<FileOutcome> {
+fn process_file(path: &Path, new: ExifDateTime, dry_run: bool) -> Result<FileOutcome> {
     let mut buf = fs::read(path).with_context(|| format!("読み込みに失敗: {}", path.display()))?;
     let offsets = exif_patch::find_datetime_offsets(&buf)?;
-    let old = exif_patch::read_at(&buf, offsets.datetime_original)?;
+    let old = exif_patch::read_datetime_at(&buf, offsets.datetime_original)?;
     // 全対象タグが既に割り当て時刻と一致していれば書き込み自体をスキップする
+    let new_bytes = new.to_exif_bytes();
     let unchanged = offsets
         .all()
         .into_iter()
-        .all(|o| &buf[o..o + exif_patch::DATETIME_LEN] == new.as_bytes());
+        .all(|o| buf[o..o + exif_patch::DATETIME_LEN] == new_bytes);
     if !unchanged {
-        exif_patch::patch_datetimes(&mut buf, &offsets, new)?;
+        exif_patch::patch_datetimes(&mut buf, &offsets, new);
         if !dry_run {
             write_atomic(path, &buf)?;
         }
     }
-    Ok(FileOutcome {
-        old,
-        new: new.to_string(),
-    })
+    Ok(FileOutcome { old, new })
 }
 
 /// 書き込み途中でクラッシュしても元ファイルが壊れないよう、

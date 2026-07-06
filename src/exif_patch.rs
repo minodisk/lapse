@@ -14,6 +14,7 @@
 //! インプレース置換する自前の最小 TIFF/IFD ウォーカーを実装している。
 //! これにより「差分バイトが対象タグの値領域のみ」であることをテストで保証できる。
 
+use crate::ExifDateTime;
 use anyhow::{bail, ensure, Context, Result};
 
 /// EXIF 日時 "YYYY:MM:DD HH:MM:SS" の長さ（NUL 終端を含まない）
@@ -77,30 +78,25 @@ pub fn find_datetime_offsets(buf: &[u8]) -> Result<DateTimeOffsets> {
     })
 }
 
-/// DateTimeOriginal の現在値を文字列で読み取る。
-pub fn read_datetime_original(buf: &[u8]) -> Result<String> {
+/// DateTimeOriginal の現在値を読み取る。
+pub fn read_datetime_original(buf: &[u8]) -> Result<ExifDateTime> {
     let offsets = find_datetime_offsets(buf)?;
-    read_at(buf, offsets.datetime_original)
+    read_datetime_at(buf, offsets.datetime_original)
 }
 
-/// 指定オフセットにある 19 バイトの日時文字列を読み取る。
-pub fn read_at(buf: &[u8], offset: usize) -> Result<String> {
-    let bytes = &buf[offset..offset + DATETIME_LEN];
-    let s = std::str::from_utf8(bytes).context("日時タグの値が ASCII ではありません")?;
-    Ok(s.to_string())
+/// 指定オフセットにある 19 バイトの日時を読み取る。
+pub fn read_datetime_at(buf: &[u8], offset: usize) -> Result<ExifDateTime> {
+    ExifDateTime::from_exif_bytes(&buf[offset..offset + DATETIME_LEN])
 }
 
-/// 見つかった日時タグの値領域（各 19 バイト）を新しい日時文字列で上書きする。
-/// バッファ長は変化しない。
-pub fn patch_datetimes(buf: &mut [u8], offsets: &DateTimeOffsets, new: &str) -> Result<()> {
-    ensure!(
-        new.len() == DATETIME_LEN,
-        "日時文字列は {DATETIME_LEN} バイト固定です: {new:?}"
-    );
+/// 見つかった日時タグの値領域（各 19 バイト）を新しい日時で上書きする。
+/// ExifDateTime は常に有効な 19 バイト表現を持つことが型で保証されるため
+/// 検証は不要で、バッファ長も変化しない。
+pub fn patch_datetimes(buf: &mut [u8], offsets: &DateTimeOffsets, new: ExifDateTime) {
+    let bytes = new.to_exif_bytes();
     for off in offsets.all() {
-        buf[off..off + DATETIME_LEN].copy_from_slice(new.as_bytes());
+        buf[off..off + DATETIME_LEN].copy_from_slice(&bytes);
     }
-    Ok(())
 }
 
 /// JPEG セグメントを走査し、APP1(Exif) の
