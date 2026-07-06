@@ -23,7 +23,12 @@ struct Args {
 
 fn main() -> ExitCode {
     let args = Args::parse();
-    let summary = match lapse::run(&args.dir, &Options { dry_run: args.dry_run }) {
+    let summary = match lapse::run(
+        &args.dir,
+        &Options {
+            dry_run: args.dry_run,
+        },
+    ) {
         Ok(summary) => summary,
         Err(e) => {
             eprintln!("エラー: {e:#}");

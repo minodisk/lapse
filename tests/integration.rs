@@ -17,7 +17,12 @@ fn setup(names: &[&str]) -> tempfile::TempDir {
 fn run_all(dir: &Path) {
     let summary = run(dir, &Options { dry_run: false }).unwrap();
     for (path, result) in &summary.results {
-        assert!(result.is_ok(), "{} の処理に失敗: {:?}", path.display(), result.as_ref().err());
+        assert!(
+            result.is_ok(),
+            "{} の処理に失敗: {:?}",
+            path.display(),
+            result.as_ref().err()
+        );
     }
 }
 
@@ -297,8 +302,16 @@ fn test_scene_times_preserved_and_pushed_only_when_caught_up() {
 #[test]
 fn test_idempotent_when_already_unique() {
     let dir = tempfile::tempdir().unwrap();
-    fs::write(dir.path().join("a.jpg"), common::sample_jpeg_with("2024:01:02 03:04:59")).unwrap();
-    fs::write(dir.path().join("b.jpg"), common::sample_jpeg_with("2024:01:02 03:05:10")).unwrap();
+    fs::write(
+        dir.path().join("a.jpg"),
+        common::sample_jpeg_with("2024:01:02 03:04:59"),
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("b.jpg"),
+        common::sample_jpeg_with("2024:01:02 03:05:10"),
+    )
+    .unwrap();
     let before_a = fs::read(dir.path().join("a.jpg")).unwrap();
     let before_b = fs::read(dir.path().join("b.jpg")).unwrap();
 

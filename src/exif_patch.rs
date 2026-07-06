@@ -70,7 +70,8 @@ pub fn find_datetime_offsets(buf: &[u8]) -> Result<DateTimeOffsets> {
     }
 
     Ok(DateTimeOffsets {
-        datetime_original: datetime_original.context("DateTimeOriginal (タグ 0x9003) がありません")?,
+        datetime_original: datetime_original
+            .context("DateTimeOriginal (タグ 0x9003) がありません")?,
         datetime_digitized,
         datetime,
     })
@@ -111,7 +112,10 @@ fn find_exif_tiff(buf: &[u8]) -> Result<(usize, usize)> {
     );
     let mut pos = 2;
     while pos + 2 <= buf.len() {
-        ensure!(buf[pos] == 0xFF, "不正な JPEG セグメント構造 (offset {pos})");
+        ensure!(
+            buf[pos] == 0xFF,
+            "不正な JPEG セグメント構造 (offset {pos})"
+        );
         let marker = buf[pos + 1];
         // fill byte (0xFF の連続) を許容
         if marker == 0xFF {
@@ -160,13 +164,21 @@ struct Entry {
 
 impl<'a> Tiff<'a> {
     fn new(buf: &'a [u8], base: usize, end: usize) -> Result<Self> {
-        ensure!(end <= buf.len() && end - base >= 8, "TIFF ヘッダが短すぎます");
+        ensure!(
+            end <= buf.len() && end - base >= 8,
+            "TIFF ヘッダが短すぎます"
+        );
         let little_endian = match &buf[base..base + 2] {
             b"II" => true,
             b"MM" => false,
             _ => bail!("TIFF バイトオーダーが不正です"),
         };
-        let tiff = Tiff { buf, base, end, little_endian };
+        let tiff = Tiff {
+            buf,
+            base,
+            end,
+            little_endian,
+        };
         ensure!(tiff.u16(2)? == 42, "TIFF マジックナンバーが不正です");
         Ok(tiff)
     }
@@ -213,7 +225,11 @@ impl<'a> Tiff<'a> {
     /// ASCII 日時タグの値領域の絶対オフセットを返す。
     /// 日時は 19 文字 + NUL の 20 バイトで 4 バイトを超えるため、値は必ずオフセット参照。
     fn ascii_value_abs(&self, e: &Entry) -> Result<usize> {
-        ensure!(e.typ == 2, "日時タグ 0x{:04X} が ASCII 型ではありません", e.tag);
+        ensure!(
+            e.typ == 2,
+            "日時タグ 0x{:04X} が ASCII 型ではありません",
+            e.tag
+        );
         ensure!(
             e.count as usize >= DATETIME_LEN,
             "日時タグ 0x{:04X} の長さが不正です",

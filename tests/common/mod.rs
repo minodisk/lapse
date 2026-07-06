@@ -109,7 +109,13 @@ fn build_exif_app1(dt: &str) -> Vec<u8> {
     tiff.extend_from_slice(&5u16.to_le_bytes());
     entry(&mut tiff, 0x9003, 2, 20, off4(dto_off));
     entry(&mut tiff, 0x9004, 2, 20, off4(dtd_off));
-    entry(&mut tiff, 0x927C, 7, maker_note.len() as u32, off4(maker_off));
+    entry(
+        &mut tiff,
+        0x927C,
+        7,
+        maker_note.len() as u32,
+        off4(maker_off),
+    );
     entry(&mut tiff, 0xA002, 4, 1, off4(WIDTH));
     entry(&mut tiff, 0xA003, 4, 1, off4(HEIGHT));
     tiff.extend_from_slice(&0u32.to_le_bytes());
