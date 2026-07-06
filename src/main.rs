@@ -3,8 +3,9 @@ use lapse::Options;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-/// 連写 JPEG の DateTimeOriginal をファイル名の自然順に 1 秒ずつ進めて一意化し、
+/// 連写 JPEG の DateTimeOriginal をファイル名の自然順で秒単位に一意化し、
 /// Google フォトで撮影順が保たれるようにするツール。
+/// 同一秒に潰れた写真だけを最小限ずらし、時間の隙間がある別シーンの時刻は保つ。
 #[derive(Parser)]
 #[command(version, about)]
 struct Args {

@@ -164,7 +164,8 @@ fn test_other_exif_tags_preserved() {
     assert!(has("MakerNote"), "MakerNote が消えた");
 }
 
-/// テスト 3: DateTimeOriginal が「基準時刻 + インデックス秒」に正しく書き換わること。
+/// テスト 3: 同一秒に潰れた連写の DateTimeOriginal が
+/// 「新時刻 = max(元の時刻, 直前の新時刻 + 1 秒)」で一意化されること。
 /// 自然順ソート (img_1 < img_2 < img_10) と分の繰り上がり、
 /// YYYY:MM:DD HH:MM:SS フォーマット、0x9004 / 0x0132 の同期も検証する。
 #[test]
@@ -172,7 +173,7 @@ fn test_datetime_updated_in_natural_order() {
     let dir = setup(&["img_2.jpg", "img_10.jpg", "img_1.jpg"]);
     run_all(dir.path());
 
-    // 基準時刻 2024:01:02 03:04:59 に対して +0, +1, +2 秒
+    // 全ファイル同一秒 (2024:01:02 03:04:59) なので +0, +1, +2 秒に押し出される
     let expected = [
         ("img_1.jpg", "2024:01:02 03:04:59"),
         ("img_2.jpg", "2024:01:02 03:05:00"),
@@ -220,7 +221,8 @@ fn test_dry_run_does_not_modify_files() {
     assert_eq!(before_b, fs::read(dir.path().join("b.jpg")).unwrap());
 }
 
-/// 対象 0 件・先頭ファイルに DateTimeOriginal なし、は明確なエラーになること。
+/// 対象 0 件は明確なエラー、DateTimeOriginal のないファイルは
+/// ファイル単位のエラーとして収集されること。
 #[test]
 fn test_error_cases() {
     let empty = tempfile::tempdir().unwrap();
@@ -229,11 +231,14 @@ fn test_error_cases() {
 
     let no_exif = tempfile::tempdir().unwrap();
     fs::write(no_exif.path().join("a.jpg"), common::plain_jpeg()).unwrap();
-    let err = run(no_exif.path(), &Options { dry_run: false }).unwrap_err();
-    assert!(format!("{err:#}").contains("DateTimeOriginal"), "{err:#}");
+    let summary = run(no_exif.path(), &Options { dry_run: false }).unwrap();
+    assert_eq!(summary.results.len(), 1);
+    // EXIF セグメント自体がないので APP1 が見つからない旨のエラーになる
+    let err = summary.results[0].1.as_ref().unwrap_err();
+    assert!(format!("{err:#}").contains("Exif"), "{err:#}");
 }
 
-/// 先頭以外のファイルの失敗が全体を止めず、他ファイルは正しく処理されること。
+/// 1 ファイルの失敗が全体を止めず、他ファイルは正しく処理されること。
 #[test]
 fn test_single_file_failure_does_not_stop_others() {
     let dir = setup(&["a.jpg", "c.jpg"]);
@@ -245,12 +250,62 @@ fn test_single_file_failure_does_not_stop_others() {
     assert!(summary.results[1].1.is_err()); // b.jpg (EXIF なし)
     assert!(summary.results[2].1.is_ok()); // c.jpg
 
-    // c.jpg はインデックス 2 なので基準 +2 秒
+    // b.jpg は割り当てから除外され、c.jpg は a.jpg の直後 (+1 秒) になる
     let buf = fs::read(dir.path().join("c.jpg")).unwrap();
     assert_eq!(
         read_ascii_tag(&buf, exif::Tag::DateTimeOriginal),
-        "2024:01:02 03:05:01"
+        "2024:01:02 03:05:00"
     );
+}
+
+/// 別シーン（時間の隙間がある写真）の元時刻は保たれ、
+/// 押し出しが追いついた場合だけ最小限後ろにずれること。
+#[test]
+fn test_scene_times_preserved_and_pushed_only_when_caught_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |name: &str, dt: &str| {
+        fs::write(dir.path().join(name), common::sample_jpeg_with(dt)).unwrap();
+    };
+    // 連写 3 枚 (同一秒) + 追いつかれる写真 + 十分未来の別シーン 2 枚
+    write("img_1.jpg", "2024:01:02 03:04:59");
+    write("img_2.jpg", "2024:01:02 03:04:59");
+    write("img_3.jpg", "2024:01:02 03:04:59");
+    write("img_4.jpg", "2024:01:02 03:05:00"); // 押し出しに追いつかれる
+    write("img_5.jpg", "2024:01:02 04:00:00"); // 隙間があるので保たれる
+    write("img_6.jpg", "2024:01:02 04:00:00"); // 直前と同一秒なので +1 秒
+    run_all(dir.path());
+
+    let expected = [
+        ("img_1.jpg", "2024:01:02 03:04:59"), // 先頭は元のまま
+        ("img_2.jpg", "2024:01:02 03:05:00"),
+        ("img_3.jpg", "2024:01:02 03:05:01"),
+        ("img_4.jpg", "2024:01:02 03:05:02"), // 元時刻 03:05:00 だが追いつかれて押し出し
+        ("img_5.jpg", "2024:01:02 04:00:00"), // 元時刻がそのまま残る
+        ("img_6.jpg", "2024:01:02 04:00:01"),
+    ];
+    for (name, want) in expected {
+        let buf = fs::read(dir.path().join(name)).unwrap();
+        assert_eq!(
+            read_ascii_tag(&buf, exif::Tag::DateTimeOriginal),
+            want,
+            "{name} の DateTimeOriginal が期待値と異なる"
+        );
+    }
+}
+
+/// 既に一意な時刻のディレクトリでは何も変更されないこと（冪等性）。
+#[test]
+fn test_idempotent_when_already_unique() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.jpg"), common::sample_jpeg_with("2024:01:02 03:04:59")).unwrap();
+    fs::write(dir.path().join("b.jpg"), common::sample_jpeg_with("2024:01:02 03:05:10")).unwrap();
+    let before_a = fs::read(dir.path().join("a.jpg")).unwrap();
+    let before_b = fs::read(dir.path().join("b.jpg")).unwrap();
+
+    run_all(dir.path());
+
+    assert_eq!(before_a, fs::read(dir.path().join("a.jpg")).unwrap());
+    assert_eq!(before_b, fs::read(dir.path().join("b.jpg")).unwrap());
 }
 
 /// 拡張子フィルタ: .jpg / .jpeg（大文字小文字不問）のみ対象で、他形式は無視されること。

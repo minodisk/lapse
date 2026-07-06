@@ -15,8 +15,13 @@ pub const HEIGHT: u32 = 16;
 
 /// EXIF 付きサンプル JPEG を生成する。
 pub fn sample_jpeg() -> Vec<u8> {
+    sample_jpeg_with(BASE_DATETIME)
+}
+
+/// DateTimeOriginal を指定した EXIF 付きサンプル JPEG を生成する。
+pub fn sample_jpeg_with(dt: &str) -> Vec<u8> {
     let base = plain_jpeg();
-    let app1 = build_exif_app1(BASE_DATETIME);
+    let app1 = build_exif_app1(dt);
     // SOI 直後に APP1 を挿入する
     let mut out = Vec::with_capacity(base.len() + app1.len());
     out.extend_from_slice(&base[..2]);
