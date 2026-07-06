@@ -1,0 +1,19 @@
+[package]
+name = "lapse"
+version = "0.1.0"
+edition = "2021"
+description = "連写 JPEG の DateTimeOriginal を 1 秒刻みでずらし、Google フォトで撮影順を保つ CLI"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
+natord = "1.0"
+rayon = "1"
+tempfile = "3"
+
+[dev-dependencies]
+kamadak-exif = "0.6"
+image = "0.25"
+tempfile = "3"
