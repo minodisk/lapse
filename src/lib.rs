@@ -29,6 +29,9 @@ pub struct Options {
 pub struct FileOutcome {
     pub old: ExifDateTime,
     pub new: ExifDateTime,
+    /// True if the EXIF was rewritten (or would be rewritten in dry-run);
+    /// false if every target tag already had the assigned time
+    pub changed: bool,
 }
 
 /// Results for all files, kept in processing order (natural sort order).
@@ -145,7 +148,11 @@ fn process_file(path: &Path, new: ExifDateTime, dry_run: bool) -> Result<FileOut
             write_atomic(path, &buf)?;
         }
     }
-    Ok(FileOutcome { old, new })
+    Ok(FileOutcome {
+        old,
+        new,
+        changed: !unchanged,
+    })
 }
 
 /// Writes the whole file to a temporary file in the same directory and then

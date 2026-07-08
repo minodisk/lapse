@@ -360,7 +360,10 @@ fn test_cli_dry_run() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("img_1.jpg"), "{stdout}");
     assert!(stdout.contains("2024:01:02 03:05:00"), "{stdout}");
-    assert!(stdout.contains("2 file(s) would be rewritten"), "{stdout}");
+    assert!(
+        stdout.contains("1 of 2 file(s) would be rewritten"),
+        "{stdout}"
+    );
 
     assert_eq!(before, fs::read(dir.path().join("img_2.jpg")).unwrap());
 }
