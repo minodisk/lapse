@@ -38,11 +38,15 @@ fn main() -> ExitCode {
     };
 
     let mut succeeded = 0usize;
+    let mut changed = 0usize;
     let mut failures = Vec::new();
     for (path, result) in &summary.results {
         match result {
             Ok(outcome) => {
                 succeeded += 1;
+                if outcome.changed {
+                    changed += 1;
+                }
                 if args.dry_run {
                     println!(
                         "[dry-run] {}: {} -> {}",
@@ -59,9 +63,9 @@ fn main() -> ExitCode {
     }
 
     if args.dry_run {
-        println!("{succeeded} file(s) would be rewritten");
+        println!("{changed} of {succeeded} file(s) would be rewritten");
     } else {
-        println!("rewrote {succeeded} file(s)");
+        println!("rewrote {changed} of {succeeded} file(s)");
     }
 
     if !failures.is_empty() {
